@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.env.*
+venv/
+.envrc
+.idea/
+*.sqlite3
+*.db.DS_Store
+*.log
+*.pid
+*.egg-info/
+dist/
+build/
+*.tgz
+*.tar.gz
+*.zip
+# VSCode
+.vscode/
+# Telegram bot token/config
+config.yaml
+secrets.json
+
