@@ -1,19 +1,35 @@
+import os
 from typing import Dict, Any, List
 from openai import OpenAI
 from app.config import settings
+from app.db.mongo import users
+import inspect
 
 openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
-SYSTEM_PROMPT = """You are AI Business Buddy, a friendly, concise onboarding agent.
-Goal: quickly understand who the user is.
-Rules:
-- Ask ONE short question at a time.
-- Be warm and helpful, no sales.
-- Use the user’s language if it’s clear from messages.
-- Focus first on: name, role, company (or self-employed), location, main goals, current challenges.
-- Based on each answer, ask the next most relevant question.
-- Keep responses under 2 short sentences.
-"""
+PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "greeting_and_lang.md")
+def _load_prompt():
+    with open(PROMPT_PATH, encoding="utf-8") as f:
+        return f.read()
+
+SYSTEM_PROMPT = _load_prompt()
+
+# Описание функции для function calling
+update_user_language_schema = {
+    "name": "update_user_language",
+    "description": "Update the user's preferred language (language_code) by telegram_id.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "telegram_id": {"type": "integer", "description": "Telegram user ID"},
+            "language_code": {"type": "string", "description": "Preferred language code (e.g., 'en', 'ru')"}
+        },
+        "required": ["telegram_id", "language_code"]
+    }
+}
+
+def second_agent_stub(*args, **kwargs):
+    return "In development"
 
 def _build_llm_messages(user_doc: Dict[str, Any], history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """
@@ -49,16 +65,44 @@ def _build_llm_messages(user_doc: Dict[str, Any], history: List[Dict[str, Any]])
 
 async def generate_agent_reply(user_doc: Dict[str, Any], conversation_doc: Dict[str, Any]) -> str:
     """
-    Вызывает OpenAI для генерации следующего короткого вопроса/реплики.
-    Возвращает текст ассистента.
+    Генерирует ответ агента с поддержкой function calling.
+    Если AI вызывает функцию update_user_language, обновляет пользователя и передаёт управление второму агенту.
     """
     messages = _build_llm_messages(user_doc, conversation_doc.get("messages", []))
+    functions = [update_user_language_schema]
+    telegram_id = user_doc.get("telegram_id")
 
     resp = openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
         temperature=0.7,
         max_tokens=220,
+        functions=functions,
+        function_call="auto",
     )
-    content = resp.choices[0].message.content or "What is your name?"
-    return content.strip()
+    choice = resp.choices[0]
+    msg = choice.message
+
+    if getattr(msg, "function_call", None):
+        fn = msg.function_call
+        print(f"[function_call] AI requested function: {fn.name}, arguments: {fn.arguments}")
+        if fn.name == "update_user_language":
+            import json
+            args = json.loads(fn.arguments)
+            # Всегда используем telegram_id из user_doc, игнорируя тот, что пришёл от AI
+            args["telegram_id"] = telegram_id
+            print(f"[function_call] Final args for update_user_language: {args}")
+            update_user_language(**args)
+            # После обновления языка — передаём управление второму агенту
+            return second_agent_stub()
+        else:
+            return f"[Unknown function call: {fn.name}]"
+    else:
+        content = msg.content or "What is your name?"
+        return content.strip()
+
+def update_user_language(telegram_id: int, language_code: str) -> bool:
+    print(f"[update_user_language] Called with telegram_id={telegram_id}, language_code={language_code}")
+    result = users.update_one({"telegram_id": telegram_id}, {"$set": {"language_code": language_code}})
+    print(f"[update_user_language] Modified count: {result.modified_count}")
+    return result.modified_count > 0
