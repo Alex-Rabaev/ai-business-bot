@@ -6,11 +6,10 @@ from app.config import settings
 from app.telegram_bot.bot import bot, dp
 from app.db.mongo import users, conversations
 
-# Путь вебхука — включает токен, чтобы нельзя было угадать endpoint
+
 WEBHOOK_PATH = f"/telegram/{settings.TG_BOT_TOKEN}"
 
 def build_webhook_url() -> str:
-    # Склеиваем аккуратно, даже если в WEBHOOK_URL есть/нет завершающего слэша
     base = settings.WEBHOOK_URL.rstrip("/")
     return f"{base}{WEBHOOK_PATH}"
 
@@ -22,7 +21,6 @@ async def lifespan(app: FastAPI):
         conversations.create_index("user_id", unique=True, name="uniq_user_id")
         conversations.create_index("updated_at", name="idx_updated_at")
     except Exception as e:
-        # Если нет прав/что-то пошло не так — не валим приложение
         print(f"[WARN] Index creation skipped/error: {e}")
         
     # Ставит вебхук при старте приложения
