@@ -26,6 +26,10 @@ async def _upsert_user_and_push_user_message(message: Message) -> Tuple[Dict[str
     language_code = getattr(u, "language_code", None)
     text = _extract_text(message)
 
+    # Получаем текущий stage (по умолчанию language)
+    conv = conversations.find_one({"user_id": telegram_id}, {"stage": 1})
+    stage = conv.get("stage") if conv and "stage" in conv else "language"
+
     # USERS: создаём при первом появлении и обновляем на каждый апдейт
     users.update_one(
         {"telegram_id": telegram_id},
@@ -64,6 +68,7 @@ async def _upsert_user_and_push_user_message(message: Message) -> Tuple[Dict[str
                     "ts": now,
                     "message_id": message.message_id,
                     "chat_id": message.chat.id if message.chat else None,
+                    "stage": stage,
                 }
             },
             "$set": {"updated_at": now},
@@ -75,6 +80,9 @@ async def _upsert_user_and_push_user_message(message: Message) -> Tuple[Dict[str
 
 def _push_assistant_message(user_id: int, text: str):
     now = _now_utc()
+    # Получаем текущий stage (по умолчанию language)
+    conv = conversations.find_one({"user_id": user_id}, {"stage": 1})
+    stage = conv.get("stage") if conv and "stage" in conv else "language"
     conversations.update_one(
         {"user_id": user_id},
         {
@@ -83,6 +91,7 @@ def _push_assistant_message(user_id: int, text: str):
                     "role": "assistant",
                     "text": text,
                     "ts": now,
+                    "stage": stage,
                 }
             },
             "$set": {"updated_at": now},
