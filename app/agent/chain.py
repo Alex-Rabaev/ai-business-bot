@@ -60,6 +60,35 @@ update_preffered_name_schema = {
     }
 }
 
+# --- Survey agent function schema ---
+save_survey_answer_schema = {
+    "name": "save_survey_answer",
+    "description": "Save a survey answer for the user. Pushes a question and answer to the user's survey array in the database.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "telegram_id": {"type": "integer", "description": "Telegram user ID"},
+            "question": {"type": "string", "description": "Survey question text (as asked)"},
+            "answer": {"type": "string", "description": "User's answer to the survey question"}
+        },
+        "required": ["telegram_id", "question", "answer"]
+    }
+}
+
+# --- Finish survey function schema ---
+finish_survey_schema = {
+    "name": "finish_survey",
+    "description": "Mark the survey as complete and set the user's stage to 'summary'.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "telegram_id": {"type": "integer", "description": "Telegram user ID"}
+        },
+        "required": ["telegram_id"]
+    }
+}
+
+
 def update_profile_summary(telegram_id: int, profile_summary: str) -> bool:
     print(f"[update_profile_summary] Called with telegram_id={telegram_id}, profile_summary={profile_summary}")
     result = users.update_one({"telegram_id": telegram_id}, {"$set": {"profile_summary": profile_summary}})
@@ -72,8 +101,24 @@ def update_preffered_name(telegram_id: int, preffered_name: str) -> bool:
     print(f"[update_preffered_name] Modified count: {result.modified_count}")
     return result.modified_count > 0
 
-def second_agent_stub(*args, **kwargs):
-    return "In development"
+def save_survey_answer(telegram_id: int, question: str, answer: str) -> bool:
+    print(f"[save_survey_answer] Called with telegram_id={telegram_id}, question={question}, answer={answer}")
+    result = users.update_one(
+        {"telegram_id": telegram_id},
+        {"$push": {"survey": {"question": question, "answer": answer}}}
+    )
+    print(f"[save_survey_answer] Modified count: {result.modified_count}")
+    return result.modified_count > 0
+
+def finish_survey(telegram_id: int) -> bool:
+    print(f"[finish_survey] Called with telegram_id={telegram_id}")
+    from app.db.mongo import conversations
+    result = conversations.update_one({"user_id": telegram_id}, {"$set": {"stage": "summary"}})
+    print(f"[finish_survey] Modified count: {result.modified_count}")
+    return result.modified_count > 0
+
+# def second_agent_stub(*args, **kwargs):
+#     return "In development"
 
 def _build_llm_messages(user_doc: Dict[str, Any], history: List[Dict[str, Any]], stage: str = None) -> List[Dict[str, str]]:
     """
@@ -81,7 +126,6 @@ def _build_llm_messages(user_doc: Dict[str, Any], history: List[Dict[str, Any]],
     Если указан stage, берём только сообщения этого этапа.
     """
     msgs: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    # Опционально подскажем контекст о пользователе (если уже знаем)
     hints = []
     if user_doc:
         for k in ("first_name", "last_name", "username", "language_code", "preffered_language"):
@@ -90,7 +134,6 @@ def _build_llm_messages(user_doc: Dict[str, Any], history: List[Dict[str, Any]],
                 hints.append(f"{k}={v}")
     if hints:
         msgs.append({"role": "system", "content": "Known user hints: " + ", ".join(hints)})
-    # Фильтруем историю по stage
     if stage:
         history = [m for m in history if m.get("stage") == stage]
     recent = history[-20:] if history else []
@@ -186,7 +229,8 @@ async def generate_profile_agent_reply(user_doc: Dict[str, Any], conversation_do
             # Переключаем stage на 'survey'
             from app.db.mongo import conversations
             conversations.update_one({"user_id": telegram_id}, {"$set": {"stage": "survey"}})
-            return "Thank you! Your business profile has been saved."
+            # Если stage стал 'survey', можно вызвать survey_agent снаружи (handlers)
+            return await generate_survey_agent_reply(user_doc, conversation_doc)
         elif fn.name == "update_preffered_name":
             print(f"[profile function_call] Final args for update_preffered_name: {args}")
             update_preffered_name(**args)
@@ -209,6 +253,73 @@ async def generate_profile_agent_reply(user_doc: Dict[str, Any], conversation_do
             return f"[Unknown function call: {fn.name}]"
     else:
         content = msg.content or "Could you tell me more about your business?"
+        return content.strip()
+
+async def generate_survey_agent_reply(user_doc: Dict[str, Any], conversation_doc: Dict[str, Any]) -> str:
+    """
+    Ведёт опрос по вопросам из survey.md, сохраняет каждый ответ через функцию save_survey_answer.
+    После завершения опроса переводит stage на 'summary' через функцию finish_survey.
+    """
+    language_code = user_doc.get("preffered_language")
+    # Загружаем текст опроса
+    SURVEY_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "survey.md")
+    with open(SURVEY_PROMPT_PATH, encoding="utf-8") as f:
+        survey_prompt = f.read()
+    system_prompt = survey_prompt + f"\n\nRespond in {language_code}. After each user answer, call save_survey_answer with the question and answer. When the survey is complete, call finish_survey."
+    # Фильтруем только сообщения stage='survey'
+    history = [m for m in conversation_doc.get("messages", []) if m.get("stage") == "survey"]
+    msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    for m in history[-20:]:
+        role = m.get("role", "user")
+        text = m.get("text", "")
+        if not isinstance(text, str):
+            text = str(text)
+        if role not in ("user", "assistant"):
+            role = "user"
+        msgs.append({"role": role, "content": text})
+    functions = [save_survey_answer_schema, finish_survey_schema]
+    telegram_id = user_doc.get("telegram_id")
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=msgs,
+        temperature=0.7,
+        max_tokens=220,
+        functions=functions,
+        function_call="auto",
+    )
+    choice = resp.choices[0]
+    msg = choice.message
+    if getattr(msg, "function_call", None):
+        fn = msg.function_call
+        print(f"[survey function_call] AI requested function: {fn.name}, arguments: {fn.arguments}")
+        import json
+        args = json.loads(fn.arguments)
+        args["telegram_id"] = telegram_id  # всегда подставляем реальный id
+        if fn.name == "save_survey_answer":
+            print(f"[survey function_call] Final args for save_survey_answer: {args}")
+            save_survey_answer(**args)
+            # Добавляем system message для LLM, чтобы он знал, что ответ сохранён
+            from app.db.mongo import conversations
+            from datetime import datetime, timezone
+            conversations.update_one(
+                {"user_id": telegram_id},
+                {"$push": {"messages": {
+                    "role": "system",
+                    "text": "The answer to the previous question has been saved, move on to the next question.",
+                    "ts": datetime.now(timezone.utc),
+                    "stage": "survey"
+                }}}
+            )
+            conversation_doc = conversations.find_one({"user_id": telegram_id}, {"_id": 0}) or conversation_doc
+            return await generate_survey_agent_reply(user_doc, conversation_doc)
+        elif fn.name == "finish_survey":
+            print(f"[survey function_call] Final args for finish_survey: {args}")
+            finish_survey(**args)
+            return "Thank you for completing the survey!"
+        else:
+            return f"[Unknown function call: {fn.name}]"
+    else:
+        content = msg.content or "Thank you for completing the survey!"
         return content.strip()
 
 def update_user_language(telegram_id: int, language_code: str) -> bool:
