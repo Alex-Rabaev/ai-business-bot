@@ -6,6 +6,7 @@ from app.agent.tools.db_ops import (
     update_profile_summary,
     update_preffered_name,
     save_survey_answer,
+    save_all_survey_answers,
     finish_survey,
     update_user_email_and_final_message,
     update_user_language,
@@ -15,6 +16,8 @@ from app.agent.tools.chain_tools import (
     update_profile_summary_schema,
     update_preffered_name_schema,
     save_survey_answer_schema,
+    save_all_survey_answers_schema,
+    finish_survey_with_answers_schema,
     finish_survey_schema,
     update_user_email_and_final_message_schema,
 )
@@ -172,16 +175,34 @@ async def generate_profile_agent_reply(user_doc: Dict[str, Any], conversation_do
 
 async def generate_survey_agent_reply(user_doc: Dict[str, Any], conversation_doc: Dict[str, Any]) -> str:
     """
-    Ведёт опрос по вопросам из survey.md, сохраняет каждый ответ через функцию save_survey_answer.
-    После завершения опроса переводит stage на 'summary' через функцию finish_survey.
+    РАДИКАЛЬНОЕ РЕШЕНИЕ: AI ведет весь опрос как обычный диалог.
+    В конце, когда пользователь ответил на все вопросы, AI анализирует всю историю
+    и сохраняет все пары Q&A за один раз через finish_survey_with_answers.
     """
     language_code = user_doc.get("preffered_language")
     survey_prompt = load_survey_prompt()
-    system_prompt = survey_prompt + f"\n\nRespond in {language_code}. After each user answer, call save_survey_answer with the question and answer. When the survey is complete, call finish_survey."
+    
+    # Модифицируем промпт для нового подхода
+    enhanced_prompt = survey_prompt + f"""
+    
+IMPORTANT: Do NOT save individual answers during the survey. Just conduct the survey as a natural conversation.
+When the user has answered all relevant questions (you can skip questions that are not applicable based on their answers), 
+call finish_survey_with_answers with ALL question-answer pairs extracted from our conversation.
+
+Instructions for finish_survey_with_answers:
+1. Review the entire conversation history
+2. Extract each question you asked and the user's answer
+3. Format them as an array of objects with 'question' and 'answer' fields
+4. Include only actual survey questions and answers, not greetings or confirmations
+
+Respond in {language_code}."""
+    
     # Фильтруем только сообщения stage='survey'
     history = [m for m in conversation_doc.get("messages", []) if m.get("stage") == "survey"]
-    msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-    for m in history[-20:]:
+    msgs: List[Dict[str, str]] = [{"role": "system", "content": enhanced_prompt}]
+    
+    # Добавляем всю историю опроса
+    for m in history:
         role = m.get("role", "user")
         text = m.get("text", "")
         if not isinstance(text, str):
@@ -189,51 +210,55 @@ async def generate_survey_agent_reply(user_doc: Dict[str, Any], conversation_doc
         if role not in ("user", "assistant"):
             role = "user"
         msgs.append({"role": role, "content": text})
-    functions = [save_survey_answer_schema, finish_survey_schema]
+    
+    functions = [finish_survey_with_answers_schema]
     telegram_id = user_doc.get("telegram_id")
+    
     resp = openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=msgs,
-        temperature=0.7,
-        max_tokens=220,
+        temperature=1,
+        max_tokens=1024,  # Увеличиваем для обработки всех Q&A
         functions=functions,
         function_call="auto",
     )
     choice = resp.choices[0]
     msg = choice.message
+    
     if getattr(msg, "function_call", None):
         fn = msg.function_call
         print(f"[survey function_call] AI requested function: {fn.name}, arguments: {fn.arguments}")
         import json
-        args = json.loads(fn.arguments)
+        try:
+            print(f"[survey function_call] Raw arguments: {fn.arguments}")
+            args = json.loads(fn.arguments)
+        except json.JSONDecodeError as e:
+            print(f"[survey function_call] JSONDecodeError: {e}")
+            print(f"[survey function_call] Offending JSON (first 1000 chars): {fn.arguments[:1000]}")
+            raise
         args["telegram_id"] = telegram_id  # всегда подставляем реальный id
-        if fn.name == "save_survey_answer":
-            print(f"[survey function_call] Final args for save_survey_answer: {args}")
-            save_survey_answer(**args)
-            # Добавляем system message для LLM, чтобы он знал, что ответ сохранён
-            from app.db.mongo import conversations
-            from datetime import datetime, timezone
-            conversations.update_one(
-                {"user_id": telegram_id},
-                {"$push": {"messages": {
-                    "role": "system",
-                    "text": "The answer to the previous question has been saved, move on to the next question.",
-                    "ts": datetime.now(timezone.utc),
-                    "stage": "survey"
-                }}}
-            )
-            conversation_doc = conversations.find_one({"user_id": telegram_id}, {"_id": 0}) or conversation_doc
-            return await generate_survey_agent_reply(user_doc, conversation_doc)
-        elif fn.name == "finish_survey":
-            print(f"[survey function_call] Final args for finish_survey: {args}")
-            finish_survey(**args)
-            # Immediately start summary agent
+        
+        if fn.name == "finish_survey_with_answers":
+            print(f"[survey function_call] Saving {len(args.get('survey_data', []))} Q&A pairs")
+            # Сохраняем все ответы
+            save_all_survey_answers(telegram_id, args.get('survey_data', []))
+            # Переключаем stage
+            finish_survey(telegram_id)
+            # Переходим к summary
             from app.agent.chain import generate_summary_agent_reply
             return await generate_summary_agent_reply(user_doc, conversation_doc)
+            # Если модель сгенерировала короткое сообщение — возвращаем его
+            if msg.content and len(msg.content) < 500:
+                return msg.content.strip()
+            # Если вдруг модель вывела длинный массив — возвращаем универсальное сообщение на английском
+            return "Thank you, your answers have been saved. Moving to the next step."
         else:
             return f"[Unknown function call: {fn.name}]"
     else:
-        content = msg.content or "Thank you for completing the survey!"
+        content = msg.content or "Let me ask you about your business needs..."
+        # Если вдруг модель вывела длинный массив Q&A в content, игнорируем и возвращаем короткое сообщение
+        # if len(content) > 500:
+        #     return "Спасибо, ваши ответы сохранены. Переходим к следующему этапу."
         return content.strip()
 
 

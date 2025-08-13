@@ -53,6 +53,30 @@ save_survey_answer_schema = {
     }
 }
 
+save_all_survey_answers_schema = {
+    "name": "save_all_survey_answers",
+    "description": "Save all survey Q&A pairs at once after analyzing the conversation history.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "telegram_id": {"type": "integer", "description": "Telegram user ID"},
+            "survey_data": {
+                "type": "array",
+                "description": "Array of question-answer pairs from the survey",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "Survey question text"},
+                        "answer": {"type": "string", "description": "User's answer to the question"}
+                    },
+                    "required": ["question", "answer"]
+                }
+            }
+        },
+        "required": ["telegram_id", "survey_data"]
+    }
+}
+
 finish_survey_schema = {
     "name": "finish_survey",
     "description": "Mark the survey as complete and set the user's stage to 'summary'.",
@@ -62,6 +86,30 @@ finish_survey_schema = {
             "telegram_id": {"type": "integer", "description": "Telegram user ID"}
         },
         "required": ["telegram_id"]
+    }
+}
+
+finish_survey_with_answers_schema = {
+    "name": "finish_survey_with_answers",
+    "description": "Analyze the conversation history, extract all Q&A pairs, save them, and mark survey as complete.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "telegram_id": {"type": "integer", "description": "Telegram user ID"},
+            "survey_data": {
+                "type": "array",
+                "description": "Array of question-answer pairs extracted from the conversation",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "Survey question text"},
+                        "answer": {"type": "string", "description": "User's answer to the question"}
+                    },
+                    "required": ["question", "answer"]
+                }
+            }
+        },
+        "required": ["telegram_id", "survey_data"]
     }
 }
 

@@ -1,5 +1,5 @@
 from app.db.mongo import users, conversations
-from typing import Any
+from typing import Any, List, Dict
 
 def update_profile_summary(telegram_id: int, profile_summary: str) -> bool:
     print(f"[update_profile_summary] Called with telegram_id={telegram_id}, profile_summary={profile_summary}")
@@ -20,6 +20,21 @@ def save_survey_answer(telegram_id: int, question: str, answer: str) -> bool:
         {"$push": {"survey": {"question": question, "answer": answer}}}
     )
     print(f"[save_survey_answer] Modified count: {result.modified_count}")
+    return result.modified_count > 0
+
+def save_all_survey_answers(telegram_id: int, survey_data: List[Dict[str, str]]) -> bool:
+    """
+    Сохраняет все пары вопрос-ответ за один раз.
+    survey_data: список словарей с ключами 'question' и 'answer'
+    """
+    print(f"[save_all_survey_answers] Called with telegram_id={telegram_id}, {len(survey_data)} Q&A pairs")
+    
+    # Очищаем старые данные опроса и сохраняем новые
+    result = users.update_one(
+        {"telegram_id": telegram_id},
+        {"$set": {"survey": survey_data}}
+    )
+    print(f"[save_all_survey_answers] Modified count: {result.modified_count}")
     return result.modified_count > 0
 
 def finish_survey(telegram_id: int) -> bool:
