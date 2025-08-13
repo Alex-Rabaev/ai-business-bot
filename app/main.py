@@ -7,7 +7,7 @@ from app.telegram_bot.bot import bot, dp
 from app.db.mongo import users, conversations
 
 
-WEBHOOK_PATH = f"/telegram/{settings.TG_BOT_TOKEN}"
+WEBHOOK_PATH = f"/api/telegram/{settings.TG_BOT_TOKEN}"
 
 def build_webhook_url() -> str:
     base = settings.WEBHOOK_URL.rstrip("/")
@@ -51,6 +51,6 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 # Для быстрой проверки, что API живо
-@app.get("/")
+@app.get("/api/health")
 async def root():
     return {"status": "ok", "webhook": build_webhook_url()}
