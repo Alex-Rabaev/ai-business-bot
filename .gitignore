@@ -21,4 +21,4 @@ build/
 # Telegram bot token/config
 config.yaml
 secrets.json
-
+todo.txt
