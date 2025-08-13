@@ -107,7 +107,7 @@ async def on_any_message(message: Message):
         # 1) Сохраняем пользователя и входящее сообщение
         user_doc, conversation_doc = await _upsert_user_and_push_user_message(message)
         stage = conversation_doc.get("stage", "language")
-        from app.agent.chain import generate_profile_agent_reply, generate_survey_agent_reply
+        from app.agent.chain import generate_profile_agent_reply, generate_survey_agent_reply, generate_summary_agent_reply
         if stage == "language":
             agent_reply = await generate_agent_reply(user_doc, conversation_doc)
         elif stage == "profile":
@@ -115,7 +115,10 @@ async def on_any_message(message: Message):
         elif stage == "survey":
             agent_reply = await generate_survey_agent_reply(user_doc, conversation_doc)
         elif stage == "summary":
-            agent_reply = "Спасибо, ваш профиль и опрос завершены! Чем могу помочь дальше?"
+            agent_reply = await generate_summary_agent_reply(user_doc, conversation_doc)
+        elif stage == "final":
+            # Always reply with the saved final_message in user's preferred language
+            agent_reply = user_doc.get("final_message") or "You are in the queue for the service, we will contact you."
         else:
             agent_reply = "Что бы вы хотели обсудить?"
         _push_assistant_message(user_doc["telegram_id"], agent_reply)

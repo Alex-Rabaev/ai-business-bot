@@ -315,11 +315,89 @@ async def generate_survey_agent_reply(user_doc: Dict[str, Any], conversation_doc
         elif fn.name == "finish_survey":
             print(f"[survey function_call] Final args for finish_survey: {args}")
             finish_survey(**args)
-            return "Thank you for completing the survey!"
+            # Immediately start summary agent
+            from app.agent.chain import generate_summary_agent_reply
+            return await generate_summary_agent_reply(user_doc, conversation_doc)
         else:
             return f"[Unknown function call: {fn.name}]"
     else:
         content = msg.content or "Thank you for completing the survey!"
+        return content.strip()
+
+SUMMARY_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "summary.md")
+def _load_summary_prompt():
+    with open(SUMMARY_PROMPT_PATH, encoding="utf-8") as f:
+        return f.read()
+SUMMARY_SYSTEM_PROMPT = _load_summary_prompt()
+
+def update_user_email_and_final_message(telegram_id: int, email: str, final_message: str) -> bool:
+    print(f"[update_user_email_and_final_message] Called with telegram_id={telegram_id}, email={email}")
+    result = users.update_one(
+        {"telegram_id": telegram_id},
+        {"$set": {"email": email, "final_message": final_message}}
+    )
+    print(f"[update_user_email_and_final_message] Modified count: {result.modified_count}")
+    return result.modified_count > 0
+
+async def generate_summary_agent_reply(user_doc: Dict[str, Any], conversation_doc: Dict[str, Any]) -> str:
+    """
+    Ведёт диалог по summary, собирает email, генерирует финальное сообщение, сохраняет его и переводит stage на 'final'.
+    """
+    language_code = user_doc.get("preffered_language")
+    system_prompt = SUMMARY_SYSTEM_PROMPT + f"\n\nRespond in {language_code}. When you receive the user's email, call the function update_user_email_and_final_message with the email and a final message for the user (in their language) that says they are in the queue and will be contacted."
+    # Фильтруем только сообщения stage='summary'
+    history = [m for m in conversation_doc.get("messages", []) if m.get("stage") == "summary"]
+    msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    for m in history[-20:]:
+        role = m.get("role", "user")
+        text = m.get("text", "")
+        if not isinstance(text, str):
+            text = str(text)
+        if role not in ("user", "assistant"):
+            role = "user"
+        msgs.append({"role": role, "content": text})
+    # Function schema for email and final message
+    update_user_email_and_final_message_schema = {
+        "name": "update_user_email_and_final_message",
+        "description": "Save the user's email and the final message, and set the user's stage to 'final'.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "telegram_id": {"type": "integer", "description": "Telegram user ID"},
+                "email": {"type": "string", "description": "User's email address"},
+                "final_message": {"type": "string", "description": "Final message to show the user (in their language)"}
+            },
+            "required": ["telegram_id", "email", "final_message"]
+        }
+    }
+    telegram_id = user_doc.get("telegram_id")
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=msgs,
+        temperature=0.7,
+        max_tokens=220,
+        functions=[update_user_email_and_final_message_schema],
+        function_call="auto",
+    )
+    choice = resp.choices[0]
+    msg = choice.message
+    if getattr(msg, "function_call", None):
+        fn = msg.function_call
+        print(f"[summary function_call] AI requested function: {fn.name}, arguments: {fn.arguments}")
+        import json
+        args = json.loads(fn.arguments)
+        args["telegram_id"] = telegram_id
+        if fn.name == "update_user_email_and_final_message":
+            print(f"[summary function_call] Final args for update_user_email_and_final_message: {args}")
+            update_user_email_and_final_message(**args)
+            # Переводим stage на 'final'
+            from app.db.mongo import conversations
+            conversations.update_one({"user_id": telegram_id}, {"$set": {"stage": "final"}})
+            return args["final_message"]
+        else:
+            return f"[Unknown function call: {fn.name}]"
+    else:
+        content = msg.content or "Please provide your email to get early access."
         return content.strip()
 
 def update_user_language(telegram_id: int, language_code: str) -> bool:
