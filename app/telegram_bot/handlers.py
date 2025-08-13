@@ -1,6 +1,6 @@
 from aiogram.types import Message
 from app.db.mongo import users, conversations
-from app.agent.chain import generate_agent_reply
+from app.agent.chain import generate_greet_and_lang_agent_reply, generate_profile_agent_reply, generate_survey_agent_reply, generate_summary_agent_reply
 import html
 import json
 from datetime import datetime, timezone
@@ -107,9 +107,8 @@ async def on_any_message(message: Message):
         # 1) Сохраняем пользователя и входящее сообщение
         user_doc, conversation_doc = await _upsert_user_and_push_user_message(message)
         stage = conversation_doc.get("stage", "language")
-        from app.agent.chain import generate_profile_agent_reply, generate_survey_agent_reply, generate_summary_agent_reply
         if stage == "language":
-            agent_reply = await generate_agent_reply(user_doc, conversation_doc)
+            agent_reply = await generate_greet_and_lang_agent_reply(user_doc, conversation_doc)
         elif stage == "profile":
             agent_reply = await generate_profile_agent_reply(user_doc, conversation_doc)
         elif stage == "survey":
