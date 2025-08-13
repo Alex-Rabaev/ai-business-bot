@@ -78,6 +78,10 @@ async def _upsert_user_and_push_user_message(message: Message) -> Tuple[Dict[str
     conversation_doc = conversations.find_one({"user_id": telegram_id}, {"_id": 0}) or {}
     return user_doc, conversation_doc
 
+async def _delete_user_and_conversation(telegram_id: int):
+    users.delete_one({"telegram_id": telegram_id})
+    conversations.delete_one({"user_id": telegram_id})
+
 def _push_assistant_message(user_id: int, text: str):
     now = _now_utc()
     # Получаем текущий stage (по умолчанию language)
@@ -100,6 +104,25 @@ def _push_assistant_message(user_id: int, text: str):
     )
 
 from app.telegram_bot.bot import dp
+try:
+    from aiogram.exceptions import CancelHandler
+except ImportError:
+    CancelHandler = None
+
+@dp.message(lambda message: message.text and message.text.strip() == "/reset")
+async def on_reset_command(message: Message):
+    u = message.from_user
+    if not u:
+        await message.answer("Пользователь не найден.")
+        if CancelHandler:
+            raise CancelHandler()
+        return
+    telegram_id = u.id
+    await _delete_user_and_conversation(telegram_id)
+    await message.answer("Your data has been reset. The conversation will start over. Send any message to start.")
+    if CancelHandler:
+        raise CancelHandler()
+    return
 
 @dp.message()
 async def on_any_message(message: Message):

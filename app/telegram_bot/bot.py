@@ -10,4 +10,5 @@ bot = Bot(
 dp = Dispatcher()
 
 # Импорт обработчиков, чтобы они зарегистрировались
+from app.telegram_bot.handlers import on_reset_command
 from app.telegram_bot.handlers import on_any_message
