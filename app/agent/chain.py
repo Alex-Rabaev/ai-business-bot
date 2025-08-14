@@ -5,7 +5,6 @@ from app.config import settings
 from app.agent.tools.db_ops import (
     update_profile_summary,
     update_preffered_name,
-    save_survey_answer,
     save_all_survey_answers,
     finish_survey,
     update_user_email_and_final_message,
@@ -15,10 +14,7 @@ from app.agent.tools.chain_tools import (
     update_user_language_schema,
     update_profile_summary_schema,
     update_preffered_name_schema,
-    save_survey_answer_schema,
-    save_all_survey_answers_schema,
     finish_survey_with_answers_schema,
-    finish_survey_schema,
     update_user_email_and_final_message_schema,
 )
 from app.agent.tools.prompt_loader import (
@@ -97,6 +93,7 @@ async def generate_greet_and_lang_agent_reply(user_doc: Dict[str, Any], conversa
             conversations.update_one({"user_id": telegram_id}, {"$set": {"stage": "profile"}})
             # Перечитываем user_doc с актуальным preffered_language
             fresh_user_doc = users.find_one({"telegram_id": telegram_id}, {"_id": 0}) or user_doc
+            print(f"--------->>>>>>>>>>>>>>>>>>>>>>>>>>>>[function_call] Fresh user doc: {fresh_user_doc}")
             return await generate_profile_agent_reply(fresh_user_doc, conversation_doc)
         else:
             return f"[Unknown function call: {fn.name}]"
@@ -109,8 +106,9 @@ async def generate_profile_agent_reply(user_doc: Dict[str, Any], conversation_do
     """
     Ведёт диалог по бизнес-профилю, собирает ответы, генерирует summary и сохраняет его через function_call.
     """
-    language_code = user_doc.get("preffered_language")
-    system_prompt = PROFILE_SYSTEM_PROMPT + f"\n\nRespond in {language_code}. When you have enough information, call the function update_profile_summary with a short summary (one sentence) based on the user's answers. When you learn the user's preferred name, call the function update_preffered_name."
+    preffered_language = user_doc.get("preffered_language")
+    print(f"[profile agent] Language code: {preffered_language}")
+    system_prompt = PROFILE_SYSTEM_PROMPT + f"\n\nRespond in {preffered_language}. When you have enough information, call the function update_profile_summary with a short summary (one sentence) based on the user's answers. When you learn the user's preferred name, call the function update_preffered_name."
     # Фильтруем только сообщения stage='profile'
     history = [m for m in conversation_doc.get("messages", []) if m.get("stage") == "profile"]
     msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
@@ -144,15 +142,17 @@ async def generate_profile_agent_reply(user_doc: Dict[str, Any], conversation_do
             print(f"[profile function_call] Final args for update_profile_summary: {args}")
             update_profile_summary(**args)
             # Переключаем stage на 'survey'
-            from app.db.mongo import conversations
+            from app.db.mongo import conversations, users
             conversations.update_one({"user_id": telegram_id}, {"$set": {"stage": "survey"}})
+            fresh_user_doc = users.find_one({"telegram_id": telegram_id}, {"_id": 0}) or user_doc
+            print(f"PPPPPPPPP-------------->>>>>>>>>>>>>[profile function_call] Fresh user doc: {fresh_user_doc}")
             # Если stage стал 'survey', можно вызвать survey_agent снаружи (handlers)
-            return await generate_survey_agent_reply(user_doc, conversation_doc)
+            return await generate_survey_agent_reply(fresh_user_doc, conversation_doc)
         elif fn.name == "update_preffered_name":
             print(f"[profile function_call] Final args for update_preffered_name: {args}")
             update_preffered_name(**args)
             # Добавляем assistant message в историю, чтобы LLM видел, что имя уже сохранено
-            from app.db.mongo import conversations
+            from app.db.mongo import conversations, users
             from datetime import datetime, timezone
             conversations.update_one(
                 {"user_id": telegram_id},
@@ -165,7 +165,8 @@ async def generate_profile_agent_reply(user_doc: Dict[str, Any], conversation_do
             )
             # Перечитываем conversation_doc для актуальной истории
             conversation_doc = conversations.find_one({"user_id": telegram_id}, {"_id": 0}) or conversation_doc
-            return await generate_profile_agent_reply(user_doc, conversation_doc)
+            fresh_user_doc = users.find_one({"telegram_id": telegram_id}, {"_id": 0}) or user_doc
+            return await generate_profile_agent_reply(fresh_user_doc, conversation_doc)
         else:
             return f"[Unknown function call: {fn.name}]"
     else:
@@ -179,7 +180,8 @@ async def generate_survey_agent_reply(user_doc: Dict[str, Any], conversation_doc
     В конце, когда пользователь ответил на все вопросы, AI анализирует всю историю
     и сохраняет все пары Q&A за один раз через finish_survey_with_answers.
     """
-    language_code = user_doc.get("preffered_language")
+    preffered_language = user_doc.get("preffered_language")
+    profile_summary = user_doc.get("profile_summary")
     survey_prompt = load_survey_prompt()
     
     # Модифицируем промпт для нового подхода
@@ -195,7 +197,10 @@ Instructions for finish_survey_with_answers:
 3. Format them as an array of objects with 'question' and 'answer' fields
 4. Include only actual survey questions and answers, not greetings or confirmations
 
-Respond in {language_code}."""
+Respond in {preffered_language}.
+
+Use user's profile summary for an individual approach: {profile_summary}
+"""
     
     # Фильтруем только сообщения stage='survey'
     history = [m for m in conversation_doc.get("messages", []) if m.get("stage") == "survey"]
@@ -246,19 +251,16 @@ Respond in {language_code}."""
             finish_survey(telegram_id)
             # Переходим к summary
             from app.agent.chain import generate_summary_agent_reply
-            return await generate_summary_agent_reply(user_doc, conversation_doc)
-            # Если модель сгенерировала короткое сообщение — возвращаем его
-            if msg.content and len(msg.content) < 500:
-                return msg.content.strip()
-            # Если вдруг модель вывела длинный массив — возвращаем универсальное сообщение на английском
-            return "Thank you, your answers have been saved. Moving to the next step."
+            from app.db.mongo import users, conversations
+            fresh_user_doc = users.find_one({"telegram_id": telegram_id}, {"_id": 0}) or user_doc
+            fresh_conversation_doc = conversations.find_one({"user_id": telegram_id}, {"_id": 0}) or conversation_doc
+            print(f"UUUUUUUUSSSSSSSSEEEEEEEERRRRRRRRR________---------->>>>>>>>>>>[survey function_call] Fresh user doc: {fresh_user_doc}")
+            print(f"[survey function_call] Fresh conversation doc: {fresh_conversation_doc}")
+            return await generate_summary_agent_reply(fresh_user_doc, fresh_conversation_doc)
         else:
             return f"[Unknown function call: {fn.name}]"
     else:
         content = msg.content or "Let me ask you about your business needs..."
-        # Если вдруг модель вывела длинный массив Q&A в content, игнорируем и возвращаем короткое сообщение
-        # if len(content) > 500:
-        #     return "Спасибо, ваши ответы сохранены. Переходим к следующему этапу."
         return content.strip()
 
 
@@ -266,8 +268,18 @@ async def generate_summary_agent_reply(user_doc: Dict[str, Any], conversation_do
     """
     Ведёт диалог по summary, собирает email, генерирует финальное сообщение, сохраняет его и переводит stage на 'final'.
     """
-    language_code = user_doc.get("preffered_language")
-    system_prompt = SUMMARY_SYSTEM_PROMPT + f"\n\nRespond in {language_code}. When you receive the user's email, call the function update_user_email_and_final_message with the email and a final message for the user (in their language) that says they are in the queue and will be contacted."
+    preffered_language = user_doc.get("preffered_language")
+    profile_summary = user_doc.get("profile_summary")
+    survey_data = user_doc.get("survey")
+    system_prompt = SUMMARY_SYSTEM_PROMPT + f"""
+    \n\nRespond in {preffered_language}. 
+
+    Use user's profile summary for an individual approach: {profile_summary}
+    
+    Use user's survey data for an individual approach: {survey_data}
+    
+    When you receive the user's email, call the function update_user_email_and_final_message with the email and a final message for the user (in their language) that says they are in the queue and will be contacted.
+    """
     # Фильтруем только сообщения stage='summary'
     history = [m for m in conversation_doc.get("messages", []) if m.get("stage") == "summary"]
     msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
@@ -283,8 +295,8 @@ async def generate_summary_agent_reply(user_doc: Dict[str, Any], conversation_do
     resp = openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=msgs,
-        temperature=0.7,
-        max_tokens=220,
+        temperature=1,
+        max_tokens=1024,
         functions=[update_user_email_and_final_message_schema],
         function_call="auto",
     )

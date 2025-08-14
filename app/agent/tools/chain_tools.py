@@ -7,7 +7,7 @@ update_user_language_schema = {
         "type": "object",
         "properties": {
             "telegram_id": {"type": "integer", "description": "Telegram user ID"},
-            "language_code": {"type": "string", "description": "Preferred language code (e.g., 'en', 'ru')"}
+            "language_code": {"type": "string", "description": "Preferred language name (e.g., 'English', 'Русский', 'עברית')"}
         },
         "required": ["telegram_id", "language_code"]
     }
