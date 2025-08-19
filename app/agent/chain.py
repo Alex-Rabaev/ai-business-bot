@@ -123,7 +123,7 @@ async def generate_profile_agent_reply(user_doc: Dict[str, Any], conversation_do
     functions = [update_profile_summary_schema, update_preffered_name_schema]
     telegram_id = user_doc.get("telegram_id")
     resp = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=msgs,
         temperature=0.7,
         max_tokens=220,
@@ -220,7 +220,7 @@ Use user's profile summary for an individual approach: {profile_summary}
     telegram_id = user_doc.get("telegram_id")
     
     resp = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=msgs,
         temperature=1,
         max_tokens=1024,  # Увеличиваем для обработки всех Q&A
@@ -293,7 +293,7 @@ async def generate_summary_agent_reply(user_doc: Dict[str, Any], conversation_do
         msgs.append({"role": role, "content": text})
     telegram_id = user_doc.get("telegram_id")
     resp = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=msgs,
         temperature=1,
         max_tokens=1024,
